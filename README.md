@@ -56,7 +56,7 @@ Request:
 `GET /api/wallet/accounts/{accountNumber}/balance`
 
 ## Setup & Run
-From project root (`test/`):
+From the repository root (your current folder):
 
 ```bash
 ./mvnw clean test
@@ -64,6 +64,12 @@ From project root (`test/`):
 ```
 
 Server runs on `http://localhost:9090`.
+
+If needed, confirm you are at the root before running commands:
+```bash
+pwd
+ls
+```
 
 ## Quick Curl Demo
 ```bash
