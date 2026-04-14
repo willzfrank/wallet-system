@@ -55,6 +55,10 @@ Request:
 ### 3) Get Account Balance
 `GET /api/wallet/accounts/{accountNumber}/balance`
 
+## API Docs (Swagger UI)
+- Swagger UI: `http://localhost:9090/swagger-ui/index.html`
+- OpenAPI JSON: `http://localhost:9090/v3/api-docs`
+
 ## Setup & Run
 From the repository root (your current folder):
 
