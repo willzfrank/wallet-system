@@ -6,6 +6,7 @@ import com.example.test.dto.CreateUserAccountResponse;
 import com.example.test.dto.DoTransDto;
 import com.example.test.dto.TransferResponse;
 import com.example.test.exception.AccountNotFoundException;
+import com.example.test.exception.AccountNumberGenerationException;
 import com.example.test.exception.DuplicateUserException;
 import com.example.test.exception.InsufficientFundsException;
 import com.example.test.exception.InvalidTransferException;
@@ -21,6 +22,7 @@ import jakarta.transaction.Transactional;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 
@@ -51,6 +53,11 @@ public class DoService implements ServiceCall {
 
     @Override
     @Transactional
+    @Retryable(
+            retryFor = DataIntegrityViolationException.class,
+            maxAttempts = 5,
+            backoff = @Backoff(delay = 20, multiplier = 2.0)
+    )
     public CreateUserAccountResponse createUserAndAccount(CreateUserAccountRequest request) {
         if (userRepo.findByEmail(request.getEmail()).isPresent()) {
             throw new DuplicateUserException("User already exists for email: " + request.getEmail());
@@ -74,13 +81,7 @@ public class DoService implements ServiceCall {
         account.setWalletBalance(walletBalance);
 
         user.getAccounts().add(account);
-        User savedUser;
-        try {
-            savedUser = userRepo.save(user);
-        } catch (DataIntegrityViolationException ex) {
-            // Handles race where another transaction creates same email after pre-check.
-            throw new DuplicateUserException("User already exists for email: " + request.getEmail());
-        }
+        User savedUser = userRepo.saveAndFlush(user);
         Account savedAccount = savedUser.getAccounts().get(0);
 
         return new CreateUserAccountResponse(
@@ -89,6 +90,17 @@ public class DoService implements ServiceCall {
                 savedAccount.getAccountNumber(),
                 savedAccount.getWalletBalance().getAmount()
         );
+    }
+
+    @Recover
+    public CreateUserAccountResponse recoverCreateUserAndAccount(
+            DataIntegrityViolationException ex,
+            CreateUserAccountRequest request
+    ) {
+        if (userRepo.findByEmail(request.getEmail()).isPresent()) {
+            throw new DuplicateUserException("User already exists for email: " + request.getEmail());
+        }
+        throw new AccountNumberGenerationException("Could not allocate a unique account number. Please retry.");
     }
 
     @Override
