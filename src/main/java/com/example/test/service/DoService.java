@@ -18,6 +18,10 @@ import com.example.test.repo.TransactionHistoryRepo;
 import com.example.test.repo.UserRepo;
 import com.example.test.repo.WalletBalanceRepo;
 import jakarta.transaction.Transactional;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -70,7 +74,13 @@ public class DoService implements ServiceCall {
         account.setWalletBalance(walletBalance);
 
         user.getAccounts().add(account);
-        User savedUser = userRepo.save(user);
+        User savedUser;
+        try {
+            savedUser = userRepo.save(user);
+        } catch (DataIntegrityViolationException ex) {
+            // Handles race where another transaction creates same email after pre-check.
+            throw new DuplicateUserException("User already exists for email: " + request.getEmail());
+        }
         Account savedAccount = savedUser.getAccounts().get(0);
 
         return new CreateUserAccountResponse(
@@ -83,6 +93,11 @@ public class DoService implements ServiceCall {
 
     @Override
     @Transactional
+    @Retryable(
+            retryFor = ObjectOptimisticLockingFailureException.class,
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 50, multiplier = 2.0)
+    )
     public TransferResponse doIntraTransfer(DoTransDto request) {
         if (request.getFromAccount().equals(request.getToAccount())) {
             throw new InvalidTransferException("Source and destination accounts cannot be the same");

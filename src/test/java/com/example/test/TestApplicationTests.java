@@ -86,6 +86,55 @@ class TestApplicationTests {
 				.andExpect(status().isNotFound());
 	}
 
+	@Test
+	void shouldRejectDuplicateEmailCreation() throws Exception {
+		CreateUserAccountRequest request = new CreateUserAccountRequest("dupe@example.com", new BigDecimal("10.00"));
+
+		mockMvc.perform(post("/api/wallet/users")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(request)))
+				.andExpect(status().isCreated());
+
+		mockMvc.perform(post("/api/wallet/users")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(request)))
+				.andExpect(status().isConflict())
+				.andExpect(jsonPath("$.message").value("User already exists for email: dupe@example.com"));
+	}
+
+	@Test
+	void shouldRejectTransferToSameAccount() throws Exception {
+		String accountNumber = createUser("self@example.com", new BigDecimal("50.00"));
+		DoTransDto transfer = new DoTransDto(accountNumber, accountNumber, new BigDecimal("10.00"));
+
+		mockMvc.perform(post("/api/wallet/transfer")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(transfer)))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value("Source and destination accounts cannot be the same"));
+	}
+
+	@Test
+	void shouldRejectBlankEmailOnCreateUser() throws Exception {
+		CreateUserAccountRequest request = new CreateUserAccountRequest(" ", new BigDecimal("10.00"));
+
+		mockMvc.perform(post("/api/wallet/users")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(request)))
+				.andExpect(status().isBadRequest());
+	}
+
+	@Test
+	void shouldRejectBlankSourceAccountOnTransfer() throws Exception {
+		String destinationAccount = createUser("valid-destination@example.com", new BigDecimal("15.00"));
+		DoTransDto transfer = new DoTransDto(" ", destinationAccount, new BigDecimal("5.00"));
+
+		mockMvc.perform(post("/api/wallet/transfer")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(transfer)))
+				.andExpect(status().isBadRequest());
+	}
+
 	private String createUser(String email, BigDecimal initialBalance) throws Exception {
 		CreateUserAccountRequest request = new CreateUserAccountRequest(email, initialBalance);
 		String response = mockMvc.perform(post("/api/wallet/users")
