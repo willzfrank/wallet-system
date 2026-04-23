@@ -180,17 +180,20 @@ public class DoService implements ServiceCall {
 
         // Reserve idempotency in an isolated transaction to avoid rollback-only poisoning
         // on constraint conflicts in this main business transaction.
-        TransferIdempotencyService.ReservationResult reservation = transferIdempotencyService.reserve(
-                request.getTransactionReference(),
-                request.getFromAccount(),
-                request.getToAccount(),
-                normalizedAmount
-        );
-        if (reservation.reservedNew()) {
+        TransactionHistory existingTransaction = null;
+        try {
+            transferIdempotencyService.reserveNew(
+                    request.getTransactionReference(),
+                    request.getFromAccount(),
+                    request.getToAccount(),
+                    normalizedAmount
+            );
             idempotencyReserved = true;
             appendAuditLog(request.getTransactionReference(), "TRANSFER_ACCEPTED", "Transfer request accepted and reserved.");
-        } else {
-            TransactionHistory existingTransaction = reservation.history();
+        } catch (DataIntegrityViolationException ex) {
+            // Read existing idempotency row in a fresh REQUIRES_NEW transaction.
+            // This avoids using a persistence context that just failed on flush.
+            existingTransaction = transferIdempotencyService.getByTransactionReference(request.getTransactionReference());
             validateIdempotencyPayload(existingTransaction, request.getFromAccount(), request.getToAccount(), normalizedAmount);
             // Enforce replay window so stale idempotency keys do not live forever.
             if (isReplayExpired(existingTransaction)) {

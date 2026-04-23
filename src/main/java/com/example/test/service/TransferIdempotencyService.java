@@ -2,7 +2,6 @@ package com.example.test.service;
 
 import com.example.test.model.TransactionHistory;
 import com.example.test.repo.TransactionHistoryRepo;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,20 +18,20 @@ public class TransferIdempotencyService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public ReservationResult reserve(String txRef, String fromAccount, String toAccount, BigDecimal amount) {
+    public TransactionHistory reserveNew(String txRef, String fromAccount, String toAccount, BigDecimal amount) {
         TransactionHistory history = new TransactionHistory();
         history.setFromAccount(fromAccount);
         history.setToAccount(toAccount);
         history.setAmount(amount);
         history.setTransactionReference(txRef);
         history.setStatus("PENDING");
-        try {
-            TransactionHistory saved = transactionHistoryRepo.saveAndFlush(history);
-            return new ReservationResult(saved, true);
-        } catch (DataIntegrityViolationException ex) {
-            TransactionHistory existing = transactionHistoryRepo.findByTransactionReference(txRef).orElseThrow(() -> ex);
-            return new ReservationResult(existing, false);
-        }
+        return transactionHistoryRepo.saveAndFlush(history);
+    }
+
+    @Transactional(readOnly = true, propagation = Propagation.REQUIRES_NEW)
+    public TransactionHistory getByTransactionReference(String txRef) {
+        return transactionHistoryRepo.findByTransactionReference(txRef)
+                .orElseThrow(() -> new IllegalStateException("Missing transaction reference: " + txRef));
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -58,5 +57,4 @@ public class TransferIdempotencyService {
         transactionHistoryRepo.save(history);
     }
 
-    public record ReservationResult(TransactionHistory history, boolean reservedNew) {}
 }
