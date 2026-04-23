@@ -20,7 +20,6 @@ import com.example.test.repo.UserRepo;
 import com.example.test.repo.WalletBalanceRepo;
 import jakarta.transaction.Transactional;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Recover;
 import org.springframework.retry.annotation.Retryable;
@@ -105,12 +104,13 @@ public class DoService implements ServiceCall {
 
     @Override
     @Transactional
-    @Retryable(
-            retryFor = ObjectOptimisticLockingFailureException.class,
-            maxAttempts = 3,
-            backoff = @Backoff(delay = 50, multiplier = 2.0)
-    )
     public TransferResponse doIntraTransfer(DoTransDto request) {
+        // Every transfer must carry a client-generated idempotency key.
+        // This lets us safely handle client retries without applying money movement twice.
+        if (request.getTransactionReference() == null || request.getTransactionReference().isBlank()) {
+            throw new InvalidTransferException("Transaction reference is required");
+        }
+
         if (request.getFromAccount().equals(request.getToAccount())) {
             throw new InvalidTransferException("Source and destination accounts cannot be the same");
         }
@@ -118,10 +118,50 @@ public class DoService implements ServiceCall {
             throw new InvalidTransferException("Transfer amount must be greater than zero");
         }
 
-        Account fromAccount = accountRepo.findByAccountNumber(request.getFromAccount())
-                .orElseThrow(() -> new AccountNotFoundException("Source account not found: " + request.getFromAccount()));
-        Account toAccount = accountRepo.findByAccountNumber(request.getToAccount())
-                .orElseThrow(() -> new AccountNotFoundException("Destination account not found: " + request.getToAccount()));
+        // Reservation-first idempotency:
+        // We insert a PENDING row first so only one request can own this transactionReference.
+        // This closes the race where two nodes could both pass a read-check before debit/credit.
+        TransactionHistory history = new TransactionHistory();
+        history.setFromAccount(request.getFromAccount());
+        history.setToAccount(request.getToAccount());
+        history.setAmount(request.getAmount());
+        history.setCreatedAt(LocalDateTime.now());
+        history.setTransactionReference(request.getTransactionReference());
+        history.setStatus("PENDING");
+        try {
+            transactionHistoryRepo.saveAndFlush(history);
+        } catch (DataIntegrityViolationException ex) {
+            TransactionHistory existingTransaction = transactionHistoryRepo
+                    .findByTransactionReference(request.getTransactionReference())
+                    .orElseThrow(() -> ex);
+            validateIdempotencyPayload(existingTransaction, request);
+            if ("SUCCESS".equals(existingTransaction.getStatus())) {
+                return buildTransferResponseFromHistory(existingTransaction);
+            }
+            throw new InvalidTransferException("Transaction reference is currently being processed. Please retry.");
+        }
+
+        // Lock both account rows in deterministic order.
+        // Why: if two transfers run in opposite directions at same time, consistent ordering avoids deadlocks.
+        String firstLockAccountNumber = request.getFromAccount().compareTo(request.getToAccount()) < 0
+                ? request.getFromAccount()
+                : request.getToAccount();
+        String secondLockAccountNumber = request.getFromAccount().compareTo(request.getToAccount()) < 0
+                ? request.getToAccount()
+                : request.getFromAccount();
+
+        Account firstLockedAccount = accountRepo.findByAccountNumberForUpdate(firstLockAccountNumber)
+                .orElseThrow(() -> new AccountNotFoundException("Account not found: " + firstLockAccountNumber));
+        Account secondLockedAccount = accountRepo.findByAccountNumberForUpdate(secondLockAccountNumber)
+                .orElseThrow(() -> new AccountNotFoundException("Account not found: " + secondLockAccountNumber));
+
+        // Map locked rows back to business roles (source/destination).
+        Account fromAccount = firstLockedAccount.getAccountNumber().equals(request.getFromAccount())
+                ? firstLockedAccount
+                : secondLockedAccount;
+        Account toAccount = firstLockedAccount.getAccountNumber().equals(request.getToAccount())
+                ? firstLockedAccount
+                : secondLockedAccount;
 
         WalletBalance fromBalance = fromAccount.getWalletBalance();
         WalletBalance toBalance = toAccount.getWalletBalance();
@@ -130,26 +170,20 @@ public class DoService implements ServiceCall {
             throw new InsufficientFundsException("Insufficient funds in account: " + request.getFromAccount());
         }
 
+        // Because rows are pessimistically locked inside this transaction,
+        // no concurrent transfer can change these two balances until commit/rollback.
         fromBalance.setAmount(fromBalance.getAmount().subtract(request.getAmount()));
         toBalance.setAmount(toBalance.getAmount().add(request.getAmount()));
 
         walletBalanceRepo.save(fromBalance);
         walletBalanceRepo.save(toBalance);
 
-        TransactionHistory history = new TransactionHistory();
-        history.setFromAccount(request.getFromAccount());
-        history.setToAccount(request.getToAccount());
-        history.setAmount(request.getAmount());
-        history.setCreatedAt(LocalDateTime.now());
+        history.setStatus("SUCCESS");
+        history.setFromBalanceAfter(fromBalance.getAmount());
+        history.setToBalanceAfter(toBalance.getAmount());
         transactionHistoryRepo.save(history);
 
-        return new TransferResponse(
-                request.getFromAccount(),
-                request.getToAccount(),
-                request.getAmount(),
-                fromBalance.getAmount(),
-                toBalance.getAmount()
-        );
+        return buildTransferResponseFromHistory(history);
     }
 
     @Override
@@ -161,5 +195,39 @@ public class DoService implements ServiceCall {
 
     private String generateAccountNumber() {
         return "ACC-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+    }
+
+    private TransferResponse buildTransferResponseFromHistory(TransactionHistory history) {
+        // Prefer persisted post-transfer balances for exact idempotent replay response.
+        BigDecimal fromBalanceAfter = history.getFromBalanceAfter();
+        BigDecimal toBalanceAfter = history.getToBalanceAfter();
+        if (fromBalanceAfter == null || toBalanceAfter == null) {
+            BalanceResponse fromBalance = getBalance(history.getFromAccount());
+            BalanceResponse toBalance = getBalance(history.getToAccount());
+            fromBalanceAfter = fromBalance.getBalance();
+            toBalanceAfter = toBalance.getBalance();
+        }
+        return new TransferResponse(
+                history.getFromAccount(),
+                history.getToAccount(),
+                history.getAmount(),
+                fromBalanceAfter,
+                toBalanceAfter
+        );
+    }
+
+    private void validateIdempotencyPayload(TransactionHistory savedHistory, DoTransDto request) {
+        // Strong production rule:
+        // A transaction reference is immutable and tied to one exact payload.
+        // If caller reuses key with a different amount/accounts, fail fast.
+        boolean sameFrom = savedHistory.getFromAccount().equals(request.getFromAccount());
+        boolean sameTo = savedHistory.getToAccount().equals(request.getToAccount());
+        boolean sameAmount = savedHistory.getAmount().compareTo(request.getAmount()) == 0;
+
+        if (!sameFrom || !sameTo || !sameAmount) {
+            throw new InvalidTransferException(
+                    "Transaction reference already used with different payload"
+            );
+        }
     }
 }

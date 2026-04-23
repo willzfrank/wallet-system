@@ -3,7 +3,7 @@
 Simple wallet service that demonstrates:
 - User creation with auto-generated account
 - Fund transfer between accounts
-- Transactional updates with optimistic locking
+- Transaction-safe fund movement with database row locking
 - Global error handling and integration tests
 
 ## Tech Stack
@@ -24,8 +24,16 @@ Simple wallet service that demonstrates:
 ## Data Model
 - `User` -> `Account` (`OneToMany`)
 - `Account` -> `WalletBalance` (`OneToOne`)
-- `WalletBalance` includes `@Version` for optimistic locking.
+- `WalletBalance` includes `@Version` as extra conflict safety.
 - `TransactionHistory` captures transfer audit trail.
+
+## Concurrency Safety (Important)
+- Transfer flow now uses **pessimistic DB locking** (`PESSIMISTIC_WRITE`) on both accounts.
+- We lock accounts in a **stable sorted order** to reduce deadlock risk.
+- This prevents two parallel requests (or two app instances) from debiting the same wallet at the same time.
+- Idempotency (`transactionReference`) uses a **reservation-first** approach (`PENDING` -> `SUCCESS`) to avoid same-key races across nodes.
+- Same key + same payload returns the original result; same key + different payload is rejected.
+- Database check constraint (`amount >= 0`) adds a hard safety net against negative balances.
 
 ## API Endpoints
 
@@ -46,11 +54,15 @@ Request:
 Request:
 ```json
 {
+  "transactionReference": "TXN-20260414-0001",
   "fromAccount": "ACC-AAAA1111",
   "toAccount": "ACC-BBBB2222",
   "amount": 25.00
 }
 ```
+
+`transactionReference` is required and used as an idempotency key. Repeating the same reference returns the original transfer result instead of re-debiting.
+If the same `transactionReference` is reused with a different payload (different source/destination/amount), the request is rejected.
 
 ### 3) Get Account Balance
 `GET /api/wallet/accounts/{accountNumber}/balance`
@@ -91,14 +103,15 @@ curl -X POST http://localhost:9090/api/wallet/users \
 ```bash
 curl -X POST http://localhost:9090/api/wallet/transfer \
   -H "Content-Type: application/json" \
-  -d '{"fromAccount":"ACC-XXXX1111","toAccount":"ACC-YYYY2222","amount":20.00}'
+  -d '{"transactionReference":"TXN-DEMO-1","fromAccount":"ACC-XXXX1111","toAccount":"ACC-YYYY2222","amount":20.00}'
 ```
 
 ## Error Handling
 Centralized by `GlobalExceptionHandler` (`@RestControllerAdvice`):
 - `404` account not found
 - `400` invalid transfer / insufficient funds / validation issues
-- `409` duplicate user or optimistic lock conflict
+- `409` duplicate user / account-number generation conflicts
+- `409` lock contention/deadlock/timeout during concurrent transfers (retryable)
 
 ## Testing
 Integration tests cover:
@@ -113,6 +126,5 @@ Run:
 ```
 
 ## Future Improvements
-- Add idempotency keys for transfer requests.
 - Add authentication/authorization.
 - Add pagination/filtering endpoint for transaction history.

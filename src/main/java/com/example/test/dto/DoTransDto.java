@@ -15,6 +15,9 @@ import java.math.BigDecimal;
 @ToString
 public class DoTransDto {
     @NotBlank
+    private String transactionReference;
+
+    @NotBlank
     private String fromAccount;
 
     @NotBlank

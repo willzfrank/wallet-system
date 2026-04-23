@@ -37,7 +37,7 @@ class TestApplicationTests {
 		String sourceAccount = createUser("source@example.com", new BigDecimal("100.00"));
 		String destinationAccount = createUser("destination@example.com", new BigDecimal("25.00"));
 
-		DoTransDto transfer = new DoTransDto(sourceAccount, destinationAccount, new BigDecimal("40.00"));
+		DoTransDto transfer = new DoTransDto("TXN-1001", sourceAccount, destinationAccount, new BigDecimal("40.00"));
 
 		mockMvc.perform(post("/api/wallet/transfer")
 						.contentType(MediaType.APPLICATION_JSON)
@@ -58,7 +58,7 @@ class TestApplicationTests {
 		String sourceAccount = createUser("poor@example.com", new BigDecimal("10.00"));
 		String destinationAccount = createUser("rich@example.com", new BigDecimal("5.00"));
 
-		DoTransDto transfer = new DoTransDto(sourceAccount, destinationAccount, new BigDecimal("20.00"));
+		DoTransDto transfer = new DoTransDto("TXN-1002", sourceAccount, destinationAccount, new BigDecimal("20.00"));
 
 		mockMvc.perform(post("/api/wallet/transfer")
 						.contentType(MediaType.APPLICATION_JSON)
@@ -72,7 +72,7 @@ class TestApplicationTests {
 		String sourceAccount = createUser("amount-a@example.com", new BigDecimal("10.00"));
 		String destinationAccount = createUser("amount-b@example.com", new BigDecimal("5.00"));
 
-		DoTransDto transfer = new DoTransDto(sourceAccount, destinationAccount, BigDecimal.ZERO);
+		DoTransDto transfer = new DoTransDto("TXN-1003", sourceAccount, destinationAccount, BigDecimal.ZERO);
 
 		mockMvc.perform(post("/api/wallet/transfer")
 						.contentType(MediaType.APPLICATION_JSON)
@@ -105,7 +105,7 @@ class TestApplicationTests {
 	@Test
 	void shouldRejectTransferToSameAccount() throws Exception {
 		String accountNumber = createUser("self@example.com", new BigDecimal("50.00"));
-		DoTransDto transfer = new DoTransDto(accountNumber, accountNumber, new BigDecimal("10.00"));
+		DoTransDto transfer = new DoTransDto("TXN-1004", accountNumber, accountNumber, new BigDecimal("10.00"));
 
 		mockMvc.perform(post("/api/wallet/transfer")
 						.contentType(MediaType.APPLICATION_JSON)
@@ -127,12 +127,56 @@ class TestApplicationTests {
 	@Test
 	void shouldRejectBlankSourceAccountOnTransfer() throws Exception {
 		String destinationAccount = createUser("valid-destination@example.com", new BigDecimal("15.00"));
-		DoTransDto transfer = new DoTransDto(" ", destinationAccount, new BigDecimal("5.00"));
+		DoTransDto transfer = new DoTransDto("TXN-1005", " ", destinationAccount, new BigDecimal("5.00"));
 
 		mockMvc.perform(post("/api/wallet/transfer")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content(objectMapper.writeValueAsString(transfer)))
 				.andExpect(status().isBadRequest());
+	}
+
+	@Test
+	void shouldBeIdempotentForDuplicateTransactionReference() throws Exception {
+		String sourceAccount = createUser("idem-source@example.com", new BigDecimal("100.00"));
+		String destinationAccount = createUser("idem-destination@example.com", new BigDecimal("10.00"));
+
+		DoTransDto transfer = new DoTransDto("TXN-IDEMPOTENT-1", sourceAccount, destinationAccount, new BigDecimal("30.00"));
+
+		mockMvc.perform(post("/api/wallet/transfer")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(transfer)))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.fromBalance").value(70.00))
+				.andExpect(jsonPath("$.toBalance").value(40.00));
+
+		// Same reference and same payload should not transfer money again.
+		mockMvc.perform(post("/api/wallet/transfer")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(transfer)))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.fromBalance").value(70.00))
+				.andExpect(jsonPath("$.toBalance").value(40.00));
+	}
+
+	@Test
+	void shouldRejectReusedTransactionReferenceWithDifferentPayload() throws Exception {
+		String sourceAccount = createUser("guard-source@example.com", new BigDecimal("100.00"));
+		String destinationAccount = createUser("guard-destination@example.com", new BigDecimal("10.00"));
+		String otherDestination = createUser("guard-other@example.com", new BigDecimal("5.00"));
+
+		DoTransDto original = new DoTransDto("TXN-GUARD-1", sourceAccount, destinationAccount, new BigDecimal("20.00"));
+		mockMvc.perform(post("/api/wallet/transfer")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(original)))
+				.andExpect(status().isOk());
+
+		// Same transaction reference but different destination/amount must be rejected.
+		DoTransDto mutated = new DoTransDto("TXN-GUARD-1", sourceAccount, otherDestination, new BigDecimal("25.00"));
+		mockMvc.perform(post("/api/wallet/transfer")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(mutated)))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value("Transaction reference already used with different payload"));
 	}
 
 	private String createUser(String email, BigDecimal initialBalance) throws Exception {

@@ -32,4 +32,16 @@ public class TransactionHistory implements Serializable {
 
     @Column(nullable = false)
     private LocalDateTime createdAt;
+
+    @Column(nullable = false, unique = true, length = 100)
+    private String transactionReference;
+
+    @Column(nullable = false, length = 20)
+    private String status;
+
+    @Column
+    private BigDecimal fromBalanceAfter;
+
+    @Column
+    private BigDecimal toBalanceAfter;
 }
