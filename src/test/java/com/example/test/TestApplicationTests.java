@@ -81,6 +81,19 @@ class TestApplicationTests {
 	}
 
 	@Test
+	void shouldRejectAmountWithMoreThanTwoDecimalPlaces() throws Exception {
+		String sourceAccount = createUser("scale-a@example.com", new BigDecimal("10.00"));
+		String destinationAccount = createUser("scale-b@example.com", new BigDecimal("5.00"));
+		DoTransDto transfer = new DoTransDto("TXN-SCALE-1", sourceAccount, destinationAccount, new BigDecimal("1.234"));
+
+		mockMvc.perform(post("/api/wallet/transfer")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(objectMapper.writeValueAsString(transfer)))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value("Amount must have at most 2 decimal places"));
+	}
+
+	@Test
 	void shouldReturnNotFoundForMissingAccount() throws Exception {
 		mockMvc.perform(get("/api/wallet/accounts/{accountNumber}/balance", "ACC-MISSING"))
 				.andExpect(status().isNotFound());
@@ -149,7 +162,8 @@ class TestApplicationTests {
 				.andExpect(jsonPath("$.fromBalance").value(70.00))
 				.andExpect(jsonPath("$.toBalance").value(40.00));
 
-		// Same reference and same payload should not transfer money again.
+		// Simulates partial failure case: first transfer committed but client retries
+		// because it did not receive response (timeout/network). No second debit should happen.
 		mockMvc.perform(post("/api/wallet/transfer")
 						.contentType(MediaType.APPLICATION_JSON)
 						.content(objectMapper.writeValueAsString(transfer)))
@@ -177,6 +191,31 @@ class TestApplicationTests {
 						.content(objectMapper.writeValueAsString(mutated)))
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.message").value("Transaction reference already used with different payload"));
+	}
+
+	@Test
+	void shouldHandleAtLeastOnceDeliveryWithoutDuplicateDebit() throws Exception {
+		String sourceAccount = createUser("delivery-source@example.com", new BigDecimal("90.00"));
+		String destinationAccount = createUser("delivery-destination@example.com", new BigDecimal("10.00"));
+		DoTransDto transfer = new DoTransDto("TXN-DELIVERY-1", sourceAccount, destinationAccount, new BigDecimal("20.00"));
+
+		// Simulate repeated delivery (client retry / gateway retry / message redelivery).
+		for (int attempt = 0; attempt < 5; attempt++) {
+			mockMvc.perform(post("/api/wallet/transfer")
+							.contentType(MediaType.APPLICATION_JSON)
+							.content(objectMapper.writeValueAsString(transfer)))
+					.andExpect(status().isOk())
+					.andExpect(jsonPath("$.fromBalance").value(70.00))
+					.andExpect(jsonPath("$.toBalance").value(30.00));
+		}
+
+		mockMvc.perform(get("/api/wallet/accounts/{accountNumber}/balance", sourceAccount))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.balance").value(70.00));
+
+		mockMvc.perform(get("/api/wallet/accounts/{accountNumber}/balance", destinationAccount))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.balance").value(30.00));
 	}
 
 	private String createUser(String email, BigDecimal initialBalance) throws Exception {

@@ -42,6 +42,16 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request);
     }
 
+    @ExceptionHandler(RateLimitExceededException.class)
+    public ResponseEntity<ErrorResponse> handleRateLimit(RateLimitExceededException ex, HttpServletRequest request) {
+        return build(HttpStatus.TOO_MANY_REQUESTS, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(CircuitBreakerOpenException.class)
+    public ResponseEntity<ErrorResponse> handleCircuitOpen(CircuitBreakerOpenException ex, HttpServletRequest request) {
+        return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), request);
+    }
+
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
     public ResponseEntity<ErrorResponse> handleOptimisticLock(ObjectOptimisticLockingFailureException ex, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, "Concurrent wallet update detected. Please retry.", request);
@@ -90,6 +100,12 @@ public class GlobalExceptionHandler {
         }
         if (root instanceof DuplicateUserException || root instanceof AccountNumberGenerationException) {
             return build(HttpStatus.CONFLICT, root.getMessage(), request);
+        }
+        if (root instanceof RateLimitExceededException) {
+            return build(HttpStatus.TOO_MANY_REQUESTS, root.getMessage(), request);
+        }
+        if (root instanceof CircuitBreakerOpenException) {
+            return build(HttpStatus.SERVICE_UNAVAILABLE, root.getMessage(), request);
         }
         if (root instanceof ObjectOptimisticLockingFailureException) {
             return build(HttpStatus.CONFLICT, "Concurrent wallet update detected. Please retry.", request);

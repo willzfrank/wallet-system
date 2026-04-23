@@ -28,12 +28,66 @@ Simple wallet service that demonstrates:
 - `TransactionHistory` captures transfer audit trail.
 
 ## Concurrency Safety (Important)
-- Transfer flow now uses **pessimistic DB locking** (`PESSIMISTIC_WRITE`) on both accounts.
-- We lock accounts in a **stable sorted order** to reduce deadlock risk.
-- This prevents two parallel requests (or two app instances) from debiting the same wallet at the same time.
-- Idempotency (`transactionReference`) uses a **reservation-first** approach (`PENDING` -> `SUCCESS`) to avoid same-key races across nodes.
-- Same key + same payload returns the original result; same key + different payload is rejected.
-- Database check constraint (`amount >= 0`) adds a hard safety net against negative balances.
+- Transfer flow uses **pessimistic DB locking** (`PESSIMISTIC_WRITE`) on both accounts.
+- Account rows are locked in a **stable sorted order** to reduce deadlock risk.
+- Duplicate-request protection is implemented with `transactionReference` idempotency.
+- Reservation-first idempotency state machine is used (`PENDING` -> `SUCCESS`).
+- Idempotency reservation/write uses isolated `REQUIRES_NEW` transactions to avoid rollback-only side effects in the transfer transaction.
+- Same key + same payload returns the original persisted result.
+- Same key + different payload is rejected to preserve request immutability.
+- Database check constraint (`amount >= 0`) protects against negative balances.
+- Transaction methods run with `READ_COMMITTED` isolation.
+
+## Time/Clock Safety (Important)
+- Transaction `createdAt` is generated from the **database clock** (`CURRENT_TIMESTAMP`).
+- Application-side `LocalDateTime.now()` is not used for critical transfer ordering timestamps.
+- This keeps a single trusted time source across multiple app instances.
+
+## Partial Failure Safety (Important)
+- Retries after timeout/network failure are handled by idempotent replay.
+- Persisted `SUCCESS` snapshots (`fromBalanceAfter` / `toBalanceAfter`) are returned on valid retries.
+- Duplicate debits are prevented when a client resubmits the same transfer request.
+- Failed transfer attempts are persisted as `FAILED` idempotency state for deterministic retry behavior.
+
+## Idempotency Lifecycle Policy
+- Replay window is configurable with `wallet.idempotency.replay-window-hours` (default: `24`).
+- Reusing a key after the replay window is rejected; clients must send a new `transactionReference`.
+- Idempotency records are retained for a configurable period using `wallet.idempotency.retention-days` (default: `7`).
+- Automatic cleanup job runs on `wallet.idempotency.cleanup-cron` (default: `0 0 2 * * *`) and deletes old `SUCCESS` records.
+
+## Delivery Semantics
+- Transfer processing is designed for **at-least-once delivery** (not exactly-once assumptions).
+- Redelivered requests are deduplicated by unique `transactionReference`.
+- First valid delivery performs the transfer; subsequent identical deliveries replay the persisted `SUCCESS` result.
+- Payload mismatch for an existing key is rejected to prevent accidental key reuse.
+
+## Rate Limiting and Backpressure
+- Transfer endpoint enforces a configurable per-second rate limit via `wallet.transfer.rate-limit-per-second`.
+- In-flight transfer concurrency is capped via `wallet.transfer.max-inflight` to protect DB and thread resources.
+- Excess traffic is rejected quickly with HTTP `429` instead of allowing cascading slowdowns/timeouts.
+- These controls work with idempotency and locking to keep the service stable during traffic spikes.
+
+## Timeout, Retry, and Circuit Breaker Policy
+- DB lock wait is bounded with `spring.jpa.properties.jakarta.persistence.lock.timeout=3000` to avoid indefinite waits.
+- Create-user retry policy is bounded and jittered:
+  - `wallet.retry.create-user.max-attempts`
+  - `wallet.retry.create-user.delay-ms`
+  - `wallet.retry.create-user.max-delay-ms`
+- Transfer path includes a lightweight circuit breaker:
+  - opens after `wallet.transfer.circuit-breaker.failure-threshold` transient failures
+  - stays open for `wallet.transfer.circuit-breaker.open-seconds`
+  - rejects fast with HTTP `503` while open
+
+## Observability and Auditability
+- Transfer events are written to an append-only `transfer_audit_logs` table.
+- Audit records are immutable (`@PreUpdate` / `@PreRemove` guard blocks modifications and deletes).
+- Key events are captured (accepted, replayed, expired replay, in-progress replay, success).
+- Audit timestamps are DB-generated to keep consistent ordering across instances.
+- Audit writes run in isolated `REQUIRES_NEW` transactions so failure traces are retained even when business transaction rolls back.
+
+## Money and Identifier Safety
+- Transfer/create amounts are normalized to 2 decimal places (`BigDecimal.setScale(2, UNNECESSARY)`), rejecting invalid precision.
+- Account number generation uses a longer UUID-derived token (`ACC-` + 16 hex chars) to reduce collision risk.
 
 ## API Endpoints
 
@@ -112,6 +166,8 @@ Centralized by `GlobalExceptionHandler` (`@RestControllerAdvice`):
 - `400` invalid transfer / insufficient funds / validation issues
 - `409` duplicate user / account-number generation conflicts
 - `409` lock contention/deadlock/timeout during concurrent transfers (retryable)
+- `429` rate-limit/backpressure rejection during overload
+- `503` transfer circuit-breaker open during repeated transient failure bursts
 
 ## Testing
 Integration tests cover:

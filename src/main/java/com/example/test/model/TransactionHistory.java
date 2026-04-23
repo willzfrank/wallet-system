@@ -8,7 +8,7 @@ import lombok.Setter;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 @Entity
 @Table(name = "transaction_history")
@@ -30,8 +30,14 @@ public class TransactionHistory implements Serializable {
     @Column(nullable = false)
     private BigDecimal amount;
 
-    @Column(nullable = false)
-    private LocalDateTime createdAt;
+    // DB clock source: avoids relying on app server time for ordering/audit.
+    @Column(
+            nullable = false,
+            insertable = false,
+            updatable = false,
+            columnDefinition = "timestamp default current_timestamp"
+    )
+    private Instant createdAt;
 
     @Column(nullable = false, unique = true, length = 100)
     private String transactionReference;
@@ -44,4 +50,7 @@ public class TransactionHistory implements Serializable {
 
     @Column
     private BigDecimal toBalanceAfter;
+
+    @Column(length = 300)
+    private String failureReason;
 }
